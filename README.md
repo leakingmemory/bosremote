@@ -34,6 +34,30 @@ Options:
 - `-u, --username`: The username for the miner (default: `root`).
 - `-p, --password`: The password for the miner.
 
+### Stop
+
+To stop the `bosminer` service on a miner, use the `stop` command. The miner must have been previously logged in.
+
+```bash
+# Stop a specific miner
+bosremote stop <IP-OR-HOSTNAME>
+
+# Stop all stored miners
+bosremote stop --all
+```
+
+### Start
+
+To start the `bosminer` service on a miner, use the `start` command. The miner must have been previously logged in.
+
+```bash
+# Start a specific miner
+bosremote start <IP-OR-HOSTNAME>
+
+# Start all stored miners
+bosremote start --all
+```
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:
