@@ -58,6 +58,18 @@ bosremote start <IP-OR-HOSTNAME>
 bosremote start --all
 ```
 
+### Status
+
+To get the current status of a miner, use the `status` command.
+
+```bash
+# Get status of a specific miner
+bosremote status <IP-OR-HOSTNAME>
+
+# Get status of all stored miners
+bosremote status --all
+```
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:

@@ -43,6 +43,14 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Get status of a miner
+    Status {
+        /// Miner IP address or hostname
+        host: Option<String>,
+        /// Get status of all stored miners
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -63,7 +71,7 @@ impl Config {
         if !config_path.exists() {
             return Ok(Config::default());
         }
-        let content = fs::read_to_string(config_path)?;
+        let content = fs::read_to_string(&config_path)?;
         let config: Config = serde_json::from_str(&content).context("Failed to parse config file")?;
         Ok(config)
     }
@@ -104,9 +112,152 @@ async fn main() -> Result<()> {
         Commands::Start { host, all } => {
             start(host, all).await?;
         }
+        Commands::Status { host, all } => {
+            status(host, all).await?;
+        }
     }
 
     Ok(())
+}
+
+async fn status(host_arg: Option<String>, all: bool) -> Result<()> {
+    let config = Config::load()?;
+    let miners_to_check = if all {
+        config.miners.values().cloned().collect::<Vec<_>>()
+    } else if let Some(host) = host_arg {
+        if let Some(miner) = config.miners.get(&host) {
+            vec![miner.clone()]
+        } else {
+            anyhow::bail!("Miner {} not found in config. Please login first.", host);
+        }
+    } else {
+        anyhow::bail!("Please specify a host or use --all");
+    };
+
+    if miners_to_check.is_empty() {
+        println!("No miners to check.");
+        return Ok(());
+    }
+
+    for miner in miners_to_check {
+        if let Err(e) = status_miner(&miner).await {
+            eprintln!("Failed to get status for miner {}: {}", miner.host, e);
+        }
+        println!(); // Add a newline between miners
+    }
+
+    Ok(())
+}
+
+async fn status_miner(miner: &Miner) -> Result<()> {
+    println!("Getting status for {}...", miner.host);
+
+    let client = Client::builder()
+        .cookie_store(true)
+        .build()?;
+
+    let base_url = if miner.host.contains("://") {
+        miner.host.clone()
+    } else {
+        format!("http://{}", miner.host)
+    };
+    let gql_url = format!("{}/graphql", base_url);
+
+    // 1. Login to get session cookie
+    let login_payload = serde_json::json!({
+        "query": "mutation ($username: String!, $password: String!) {\n  auth {\n    login(username: $username, password: $password) {\n      ... on Error {\n        message\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n",
+        "variables": {
+            "username": miner.username,
+            "password": miner.password.as_deref().unwrap_or("")
+        }
+    });
+
+    let login_response = client
+        .post(&gql_url)
+        .json(&login_payload)
+        .send()
+        .await;
+    
+    match login_response {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                anyhow::bail!("Login failed with status: {}", resp.status());
+            }
+            let login_body: serde_json::Value = resp.json().await.context("Failed to parse login response")?;
+            if login_body["data"]["auth"]["login"]["__typename"] != "VoidResult" {
+                let error_message = login_body["data"]["auth"]["login"]["message"].as_str().unwrap_or("Unknown error");
+                anyhow::bail!("Login failed: {}", error_message);
+            }
+        },
+        Err(e) => {
+            anyhow::bail!("Failed to connect to miner for login: {}", e);
+        }
+    }
+
+    // 2. Query status (Trying a query instead of subscription)
+    let query_payload = serde_json::json!({
+        "query": "query {\n  bosminer {\n    info {\n      __typename\n      summary {\n        poolStatus\n        tunerStatus\n        realHashrate {\n          mhs5S\n          mhsAv\n        }\n        temperature {\n          degreesC\n          name\n        }\n        power {\n          approxConsumptionW\n          limitW\n        }\n      }\n      fans {\n        name\n        rpm\n      }\n    }\n    __typename\n  }\n}\n"
+    });
+
+    let query_response = client
+        .post(&gql_url)
+        .json(&query_payload)
+        .send()
+        .await;
+    
+    let query_body: serde_json::Value = match query_response {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                anyhow::bail!("Status query failed with status: {}", resp.status());
+            }
+            let body: serde_json::Value = resp.json().await.context("Failed to parse status response")?;
+            body
+        },
+        Err(e) => {
+            anyhow::bail!("Failed to send status query: {}", e);
+        }
+    };
+    let info = &query_body["data"]["bosminer"]["info"];
+
+    if !info.is_null() {
+        print_status(info);
+    } else {
+        anyhow::bail!("Failed to retrieve status: bosminer.info is null or invalid. Response: {}", query_body);
+    }
+
+    Ok(())
+}
+
+fn print_status(info: &serde_json::Value) {
+    let summary = &info["summary"];
+    println!("Status: {}", summary["poolStatus"].as_str().unwrap_or("N/A"));
+    println!("Tuner: {}", summary["tunerStatus"].as_str().unwrap_or("N/A"));
+    
+    let hashrate = &summary["realHashrate"];
+    let mhs_5s = hashrate["mhs5S"].as_f64().unwrap_or(0.0);
+    let mhs_av = hashrate["mhsAv"].as_f64().unwrap_or(0.0);
+    println!("Hashrate (5s): {:.2} TH/s", mhs_5s / 1_000_000.0);
+    println!("Hashrate (Av): {:.2} TH/s", mhs_av / 1_000_000.0);
+
+    let temp = &summary["temperature"];
+    if temp.is_array() {
+        if let Some(t) = temp.as_array().and_then(|a| a.first()) {
+            println!("Temperature: {}°C ({})", t["degreesC"], t["name"].as_str().unwrap_or("N/A"));
+        }
+    } else {
+        println!("Temperature: {}°C ({})", temp["degreesC"], temp["name"].as_str().unwrap_or("N/A"));
+    }
+
+    let power = &summary["power"];
+    println!("Power: {}W / {}W limit", power["approxConsumptionW"], power["limitW"]);
+
+    if let Some(fans) = info["fans"].as_array() {
+        print!("Fans: ");
+        let fan_info: Vec<String> = fans.iter().map(|f| {
+            format!("{}: {} RPM", f["name"].as_str().unwrap_or("?"), f["rpm"])
+        }).collect();
+        println!("{}", fan_info.join(", "));
+    }
 }
 
 async fn stop(host_arg: Option<String>, all: bool) -> Result<()> {
