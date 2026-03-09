@@ -167,6 +167,13 @@ bosremote lock --all
 
 Once a miner is locked, any attempt to modify its `allow-power`, `rate-limit`, or `stop-start-delay` settings will fail. The `status`, `stop`, `start`, and `set-power` commands will continue to function normally, respecting the locked configuration.
 
+### OpenClaw Skill
+
+An example `openclaw` skill configuration is provided in the `examples/openclaw/` directory:
+- `SKILL.md`: Skill definition and natural language instructions for the agent.
+
+That files allow OpenClaw agents to interact with `bosremote` to monitor and control your miners automatically. You may want to set some boundaries by using power allowlists, rate limits and locked configuration - which you can set with the bosremote cli command before handing it over to OpenClaw.
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:
