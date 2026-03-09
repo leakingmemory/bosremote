@@ -153,6 +153,20 @@ bosremote stop-start-delay --all --list
 
 The delay is enforced locally based on the last successful `stop` command performed by `bosremote`.
 
+### Lock Configuration
+
+To prevent further changes to the power allowlist, rate limit, and stop-start delay for specific miners, use the `lock` command. **This action is final and cannot be undone via the CLI.**
+
+```bash
+# Lock configuration for a specific miner
+bosremote lock 10.54.2.249
+
+# Lock configuration for ALL stored miners
+bosremote lock --all
+```
+
+Once a miner is locked, any attempt to modify its `allow-power`, `rate-limit`, or `stop-start-delay` settings will fail. The `status`, `stop`, `start`, and `set-power` commands will continue to function normally, respecting the locked configuration.
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:

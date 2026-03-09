@@ -101,6 +101,14 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Lock the config for a miner (final, no unlock)
+    Lock {
+        /// Miner IP address or hostname
+        host: Option<String>,
+        /// Lock all stored miners
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -118,6 +126,8 @@ struct Miner {
     stop_start_delay_seconds: Option<u64>,
     #[serde(default)]
     last_stop_timestamp: Option<u64>,
+    #[serde(default)]
+    locked: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -186,6 +196,9 @@ async fn main() -> Result<()> {
         }
         Commands::StopStartDelay { host, seconds, list, all } => {
             stop_start_delay(host, seconds, list, all).await?;
+        }
+        Commands::Lock { host, all } => {
+            lock(host, all).await?;
         }
     }
 
@@ -716,6 +729,9 @@ async fn allow_power(
     if list {
         if all {
             for miner in config.miners.values() {
+                if miner.locked {
+                    println!("Miner {} is LOCKED.", miner.host);
+                }
                 if !miner.power_allowlist.is_empty() {
                     println!("Miner {} allowlist: {:?}", miner.host, miner.power_allowlist);
                 } else {
@@ -724,6 +740,9 @@ async fn allow_power(
             }
         } else if let Some(host) = host_arg {
             if let Some(miner) = config.miners.get(&host) {
+                if miner.locked {
+                    println!("Miner {} is LOCKED.", host);
+                }
                 if miner.power_allowlist.is_empty() {
                     println!("Power allowlist for {} is empty (any value allowed).", host);
                 } else {
@@ -742,16 +761,23 @@ async fn allow_power(
 
     if all {
         for miner in config.miners.values_mut() {
+            if miner.locked {
+                println!("Skipping LOCKED miner {}.", miner.host);
+                continue;
+            }
             update_allowlist(&mut miner.power_allowlist, p, remove);
         }
         println!(
-            "{} {}W {} all miners' allowlists.",
+            "{} {}W {} all unlocked miners' allowlists.",
             if remove { "Removed" } else { "Added" },
             p,
             if remove { "from" } else { "to" }
         );
     } else if let Some(host) = host_arg {
         if let Some(miner) = config.miners.get_mut(&host) {
+            if miner.locked {
+                anyhow::bail!("Miner {} is LOCKED. Configuration cannot be changed.", host);
+            }
             update_allowlist(&mut miner.power_allowlist, p, remove);
             println!(
                 "{} {}W {} allowlist for {}.",
@@ -795,6 +821,9 @@ async fn rate_limit(
     if list {
         if all {
             for miner in config.miners.values() {
+                if miner.locked {
+                    println!("Miner {} is LOCKED.", miner.host);
+                }
                 if let Some(limit) = miner.rate_limit_seconds {
                     println!("Miner {} rate limit: {}s", miner.host, limit);
                 } else {
@@ -803,6 +832,9 @@ async fn rate_limit(
             }
         } else if let Some(host) = host_arg {
             if let Some(miner) = config.miners.get(&host) {
+                if miner.locked {
+                    println!("Miner {} is LOCKED.", host);
+                }
                 if let Some(limit) = miner.rate_limit_seconds {
                     println!("Miner {} rate limit: {}s", host, limit);
                 } else {
@@ -821,15 +853,22 @@ async fn rate_limit(
 
     if all {
         for miner in config.miners.values_mut() {
+            if miner.locked {
+                println!("Skipping LOCKED miner {}.", miner.host);
+                continue;
+            }
             miner.rate_limit_seconds = s;
         }
         if let Some(val) = s {
-            println!("Set rate limit to {}s for all miners.", val);
+            println!("Set rate limit to {}s for all unlocked miners.", val);
         } else {
-            println!("Removed rate limit for all miners.");
+            println!("Removed rate limit for all unlocked miners.");
         }
     } else if let Some(host) = host_arg {
         if let Some(miner) = config.miners.get_mut(&host) {
+            if miner.locked {
+                anyhow::bail!("Miner {} is LOCKED. Configuration cannot be changed.", host);
+            }
             miner.rate_limit_seconds = s;
             if let Some(val) = s {
                 println!("Set rate limit to {}s for {}.", val, host);
@@ -858,6 +897,9 @@ async fn stop_start_delay(
     if list {
         if all {
             for miner in config.miners.values() {
+                if miner.locked {
+                    println!("Miner {} is LOCKED.", miner.host);
+                }
                 if let Some(delay) = miner.stop_start_delay_seconds {
                     println!("Miner {} stop-start delay: {}s", miner.host, delay);
                 } else {
@@ -866,6 +908,9 @@ async fn stop_start_delay(
             }
         } else if let Some(host) = host_arg {
             if let Some(miner) = config.miners.get(&host) {
+                if miner.locked {
+                    println!("Miner {} is LOCKED.", host);
+                }
                 if let Some(delay) = miner.stop_start_delay_seconds {
                     println!("Miner {} stop-start delay: {}s", host, delay);
                 } else {
@@ -884,21 +929,51 @@ async fn stop_start_delay(
 
     if all {
         for miner in config.miners.values_mut() {
+            if miner.locked {
+                println!("Skipping LOCKED miner {}.", miner.host);
+                continue;
+            }
             miner.stop_start_delay_seconds = s;
         }
         if let Some(val) = s {
-            println!("Set stop-start delay to {}s for all miners.", val);
+            println!("Set stop-start delay to {}s for all unlocked miners.", val);
         } else {
-            println!("Removed stop-start delay for all miners.");
+            println!("Removed stop-start delay for all unlocked miners.");
         }
     } else if let Some(host) = host_arg {
         if let Some(miner) = config.miners.get_mut(&host) {
+            if miner.locked {
+                anyhow::bail!("Miner {} is LOCKED. Configuration cannot be changed.", host);
+            }
             miner.stop_start_delay_seconds = s;
             if let Some(val) = s {
                 println!("Set stop-start delay to {}s for {}.", val, host);
             } else {
                 println!("Removed stop-start delay for {}.", host);
             }
+        } else {
+            anyhow::bail!("Miner {} not found in config.", host);
+        }
+    } else {
+        anyhow::bail!("Please specify a host using --host <HOST> or use --all.");
+    }
+
+    config.save()?;
+    Ok(())
+}
+
+async fn lock(host_arg: Option<String>, all: bool) -> Result<()> {
+    let mut config = Config::load()?;
+
+    if all {
+        for miner in config.miners.values_mut() {
+            miner.locked = true;
+        }
+        println!("LOCKED configuration for all miners.");
+    } else if let Some(host) = host_arg {
+        if let Some(miner) = config.miners.get_mut(&host) {
+            miner.locked = true;
+            println!("LOCKED configuration for {}.", host);
         } else {
             anyhow::bail!("Miner {} not found in config.", host);
         }
@@ -958,6 +1033,7 @@ async fn login(host: String, username: String, password: Option<String>) -> Resu
                     last_set_power_timestamp: None,
                     stop_start_delay_seconds: None,
                     last_stop_timestamp: None,
+                    locked: false,
                 },
             );
             config.save()?;
