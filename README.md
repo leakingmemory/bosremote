@@ -70,6 +70,18 @@ bosremote status <IP-OR-HOSTNAME>
 bosremote status --all
 ```
 
+### Set Power
+
+To set the power target (in Watts) for a miner, use the `set-power` command. The miner must have been previously logged in.
+
+```bash
+# Set power target for a specific miner
+bosremote set-power <IP-OR-HOSTNAME> <POWER-IN-WATTS>
+
+# Set power target for all stored miners
+bosremote set-power --all <POWER-IN-WATTS>
+```
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:

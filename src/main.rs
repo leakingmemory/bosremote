@@ -45,9 +45,17 @@ enum Commands {
     },
     /// Get status of a miner
     Status {
-        /// Miner IP address or hostname
         host: Option<String>,
         /// Get status of all stored miners
+        #[arg(short, long)]
+        all: bool,
+    },
+    /// Set power target for the miner
+    SetPower {
+        host: Option<String>,
+        /// Power target in Watts
+        power: u32,
+        /// Set power for all stored miners
         #[arg(short, long)]
         all: bool,
     },
@@ -114,6 +122,9 @@ async fn main() -> Result<()> {
         }
         Commands::Status { host, all } => {
             status(host, all).await?;
+        }
+        Commands::SetPower { host, power, all } => {
+            set_power(host, power, all).await?;
         }
     }
 
@@ -452,6 +463,117 @@ async fn start_miner(miner: &Miner) -> Result<()> {
     } else {
         let error_message = start_result["message"].as_str().unwrap_or("Unknown error");
         anyhow::bail!("Start command failed: {}", error_message);
+    }
+
+    Ok(())
+}
+
+async fn set_power(host_arg: Option<String>, power: u32, all: bool) -> Result<()> {
+    let config = Config::load()?;
+    let miners_to_set = if all {
+        config.miners.values().cloned().collect::<Vec<_>>()
+    } else if let Some(host) = host_arg {
+        if let Some(miner) = config.miners.get(&host) {
+            vec![miner.clone()]
+        } else {
+            anyhow::bail!("Miner {} not found in config. Please login first.", host);
+        }
+    } else {
+        anyhow::bail!("Please specify a host or use --all");
+    };
+
+    if miners_to_set.is_empty() {
+        println!("No miners to update.");
+        return Ok(());
+    }
+
+    for miner in miners_to_set {
+        if let Err(e) = set_power_miner(&miner, power).await {
+            eprintln!("Failed to set power for miner {}: {}", miner.host, e);
+        }
+    }
+
+    Ok(())
+}
+
+async fn set_power_miner(miner: &Miner, power: u32) -> Result<()> {
+    println!("Setting power target to {}W on {}...", power, miner.host);
+
+    let client = Client::builder()
+        .cookie_store(true)
+        .build()?;
+
+    let url = if miner.host.contains("://") {
+        format!("{}/graphql", miner.host)
+    } else {
+        format!("http://{}/graphql", miner.host)
+    };
+
+    // 1. Login to get session cookie
+    let login_payload = serde_json::json!({
+        "query": "mutation ($username: String!, $password: String!) {\n  auth {\n    login(username: $username, password: $password) {\n      ... on Error {\n        message\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n",
+        "variables": {
+            "username": miner.username,
+            "password": miner.password.as_deref().unwrap_or("")
+        }
+    });
+
+    let login_response = client
+        .post(&url)
+        .json(&login_payload)
+        .send()
+        .await
+        .context("Failed to connect to miner for login")?;
+
+    if !login_response.status().is_success() {
+        anyhow::bail!("Login failed with status: {}", login_response.status());
+    }
+
+    let login_body: serde_json::Value = login_response.json().await.context("Failed to parse login response")?;
+    if login_body["data"]["auth"]["login"]["__typename"] != "VoidResult" {
+        let error_message = login_body["data"]["auth"]["login"]["message"].as_str().unwrap_or("Unknown error");
+        anyhow::bail!("Login failed: {}", error_message);
+    }
+
+    // 2. Send set power mutation
+    let mutation_payload = serde_json::json!({
+        "query": "mutation ($tuneInput: AutotuningIn!, $apply: Boolean!) {\n  bosminer {\n    config {\n      updateAutotuning(input: $tuneInput, apply: $apply) {\n        ... on AttributeError {\n          message\n          __typename\n        }\n        ... on AutotuningError {\n          mode\n          message\n          performanceScaling {\n            powerStep\n            shutdownDuration\n            minPowerTarget\n            hashrateStep\n            minHashrateTarget\n            __typename\n          }\n          powerTarget\n          hashrateTarget\n          __typename\n        }\n        ... on AutotuningOut {\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n",
+        "variables": {
+            "tuneInput": {
+                "powerTarget": power
+            },
+            "apply": true
+        }
+    });
+
+    let response = client
+        .post(&url)
+        .json(&mutation_payload)
+        .send()
+        .await
+        .context("Failed to send set power command")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Set power command failed with status: {}", response.status());
+    }
+
+    let body: serde_json::Value = response.json().await.context("Failed to parse response body")?;
+    
+    // Expected success: {"data":{"bosminer":{"__typename":"BosminerMutation","config":{"__typename":"BosminerConfigurator","updateAutotuning":{"__typename":"AutotuningOut"}}}}}
+    let update_result = &body["data"]["bosminer"]["config"]["updateAutotuning"];
+    let typename = update_result["__typename"].as_str().unwrap_or("");
+
+    match typename {
+        "AutotuningOut" => {
+            println!("Successfully set power target to {}W on {}.", power, miner.host);
+        },
+        "AttributeError" | "AutotuningError" => {
+            let error_message = update_result["message"].as_str().unwrap_or("Unknown error");
+            anyhow::bail!("Failed to set power: {}", error_message);
+        },
+        _ => {
+            anyhow::bail!("Unexpected response from miner: {}", typename);
+        }
     }
 
     Ok(())
