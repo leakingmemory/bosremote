@@ -59,6 +59,22 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Manage the allowlist of power settings
+    AllowPower {
+        /// Miner IP address or hostname (to set allowlist for a specific miner)
+        host: Option<String>,
+        /// Power setting to add or remove
+        power: Option<u32>,
+        /// Remove the specified power setting from the allowlist
+        #[arg(short, long)]
+        remove: bool,
+        /// List all allowed power settings
+        #[arg(short, long)]
+        list: bool,
+        /// Apply allowlist change to all stored miners
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -66,6 +82,8 @@ struct Miner {
     host: String,
     username: String,
     password: Option<String>,
+    #[serde(default)]
+    power_allowlist: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -125,6 +143,9 @@ async fn main() -> Result<()> {
         }
         Commands::SetPower { host, power, all } => {
             set_power(host, power, all).await?;
+        }
+        Commands::AllowPower { host, power, remove, list, all } => {
+            allow_power(host, power, remove, list, all).await?;
         }
     }
 
@@ -470,6 +491,7 @@ async fn start_miner(miner: &Miner) -> Result<()> {
 
 async fn set_power(host_arg: Option<String>, power: u32, all: bool) -> Result<()> {
     let config = Config::load()?;
+    
     let miners_to_set = if all {
         config.miners.values().cloned().collect::<Vec<_>>()
     } else if let Some(host) = host_arg {
@@ -488,6 +510,13 @@ async fn set_power(host_arg: Option<String>, power: u32, all: bool) -> Result<()
     }
 
     for miner in miners_to_set {
+        // Check miner-specific allowlist
+        if !miner.power_allowlist.is_empty() && !miner.power_allowlist.contains(&power) {
+            println!("Error: Power setting {}W is not in the allowlist for miner {}.", power, miner.host);
+            println!("Miner allowed settings: {:?}", miner.power_allowlist);
+            continue;
+        }
+
         if let Err(e) = set_power_miner(&miner, power).await {
             eprintln!("Failed to set power for miner {}: {}", miner.host, e);
         }
@@ -579,6 +608,86 @@ async fn set_power_miner(miner: &Miner, power: u32) -> Result<()> {
     Ok(())
 }
 
+async fn allow_power(
+    host_arg: Option<String>,
+    power: Option<u32>,
+    remove: bool,
+    list: bool,
+    all: bool,
+) -> Result<()> {
+    let mut config = Config::load()?;
+
+    if list {
+        if all {
+            for miner in config.miners.values() {
+                if !miner.power_allowlist.is_empty() {
+                    println!("Miner {} allowlist: {:?}", miner.host, miner.power_allowlist);
+                } else {
+                    println!("Miner {} allowlist: empty (any value allowed)", miner.host);
+                }
+            }
+        } else if let Some(host) = host_arg {
+            if let Some(miner) = config.miners.get(&host) {
+                if miner.power_allowlist.is_empty() {
+                    println!("Power allowlist for {} is empty (any value allowed).", host);
+                } else {
+                    println!("Power allowlist for {}: {:?}", host, miner.power_allowlist);
+                }
+            } else {
+                anyhow::bail!("Miner {} not found in config.", host);
+            }
+        } else {
+            println!("Use --host <HOST> to see miner-specific allowlist or --all to see all.");
+        }
+        return Ok(());
+    }
+
+    let p = power.context("Please specify a power setting to add or remove")?;
+
+    if all {
+        for miner in config.miners.values_mut() {
+            update_allowlist(&mut miner.power_allowlist, p, remove);
+        }
+        println!(
+            "{} {}W {} all miners' allowlists.",
+            if remove { "Removed" } else { "Added" },
+            p,
+            if remove { "from" } else { "to" }
+        );
+    } else if let Some(host) = host_arg {
+        if let Some(miner) = config.miners.get_mut(&host) {
+            update_allowlist(&mut miner.power_allowlist, p, remove);
+            println!(
+                "{} {}W {} allowlist for {}.",
+                if remove { "Removed" } else { "Added" },
+                p,
+                if remove { "from" } else { "to" },
+                host
+            );
+        } else {
+            anyhow::bail!("Miner {} not found in config.", host);
+        }
+    } else {
+        anyhow::bail!("Please specify a host using --host <HOST> or use --all.");
+    }
+
+    config.save()?;
+    Ok(())
+}
+
+fn update_allowlist(list: &mut Vec<u32>, power: u32, remove: bool) {
+    if remove {
+        if let Some(pos) = list.iter().position(|&x| x == power) {
+            list.remove(pos);
+        }
+    } else {
+        if !list.contains(&power) {
+            list.push(power);
+            list.sort_unstable();
+        }
+    }
+}
+
 async fn login(host: String, username: String, password: Option<String>) -> Result<()> {
     println!("Testing login to {}...", host);
 
@@ -622,6 +731,7 @@ async fn login(host: String, username: String, password: Option<String>) -> Resu
                     host,
                     username,
                     password,
+                    power_allowlist: Vec::new(),
                 },
             );
             config.save()?;

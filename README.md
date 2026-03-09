@@ -74,6 +74,8 @@ bosremote status --all
 
 To set the power target (in Watts) for a miner, use the `set-power` command. The miner must have been previously logged in.
 
+If a power allowlist is configured, only values in the allowlist will be accepted.
+
 ```bash
 # Set power target for a specific miner
 bosremote set-power <IP-OR-HOSTNAME> <POWER-IN-WATTS>
@@ -81,6 +83,29 @@ bosremote set-power <IP-OR-HOSTNAME> <POWER-IN-WATTS>
 # Set power target for all stored miners
 bosremote set-power --all <POWER-IN-WATTS>
 ```
+
+### Power Allowlist
+
+To manage the allowlist of power settings for specific miners:
+
+```bash
+# Add a power setting to a specific miner's allowlist
+bosremote allow-power 10.54.2.249 800
+
+# Add a power setting to ALL miners' specific allowlists
+bosremote allow-power --all 800
+
+# Remove a power setting from a specific miner's allowlist
+bosremote allow-power 10.54.2.249 800 --remove
+
+# List allowed power settings for a specific miner
+bosremote allow-power --host 10.54.2.249 --list
+
+# List all allowlists for all miners
+bosremote allow-power --all --list
+```
+
+When a miner's allowlist is empty, any power setting is allowed for that miner.
 
 ### Configuration
 
