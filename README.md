@@ -130,6 +130,29 @@ bosremote rate-limit --all --list
 
 The rate limit is enforced locally based on the last successful `set-power` command performed by `bosremote`.
 
+### Stop-Start Delay
+
+To set a minimum delay in seconds between `stop` and `start` commands for specific miners:
+
+```bash
+# Set a 30-second stop-start delay for a specific miner
+bosremote stop-start-delay 10.54.2.249 30
+
+# Set a 30-second stop-start delay for ALL miners
+bosremote stop-start-delay --all 30
+
+# Remove stop-start delay for a specific miner
+bosremote stop-start-delay 10.54.2.249
+
+# List stop-start delay for a specific miner
+bosremote stop-start-delay --host 10.54.2.249 --list
+
+# List all stop-start delays for all miners
+bosremote stop-start-delay --all --list
+```
+
+The delay is enforced locally based on the last successful `stop` command performed by `bosremote`.
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:

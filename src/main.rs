@@ -88,6 +88,19 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Set a minimum delay (in seconds) between a stop and a start command
+    StopStartDelay {
+        /// Miner IP address or hostname
+        host: Option<String>,
+        /// Delay in seconds
+        seconds: Option<u64>,
+        /// List the current delay(s)
+        #[arg(short, long)]
+        list: bool,
+        /// Apply delay to all stored miners
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -101,6 +114,10 @@ struct Miner {
     rate_limit_seconds: Option<u64>,
     #[serde(default)]
     last_set_power_timestamp: Option<u64>,
+    #[serde(default)]
+    stop_start_delay_seconds: Option<u64>,
+    #[serde(default)]
+    last_stop_timestamp: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -166,6 +183,9 @@ async fn main() -> Result<()> {
         }
         Commands::RateLimit { host, seconds, list, all } => {
             rate_limit(host, seconds, list, all).await?;
+        }
+        Commands::StopStartDelay { host, seconds, list, all } => {
+            stop_start_delay(host, seconds, list, all).await?;
         }
     }
 
@@ -313,29 +333,43 @@ fn print_status(info: &serde_json::Value) {
 }
 
 async fn stop(host_arg: Option<String>, all: bool) -> Result<()> {
-    let config = Config::load()?;
-    let miners_to_stop = if all {
-        config.miners.values().cloned().collect::<Vec<_>>()
+    let mut config = Config::load()?;
+    let hosts_to_stop = if all {
+        config.miners.keys().cloned().collect::<Vec<_>>()
     } else if let Some(host) = host_arg {
-        if let Some(miner) = config.miners.get(&host) {
-            vec![miner.clone()]
+        if config.miners.contains_key(&host) {
+            vec![host]
         } else {
-            // If not in config, we can't stop because we don't have credentials
             anyhow::bail!("Miner {} not found in config. Please login first.", host);
         }
     } else {
         anyhow::bail!("Please specify a host or use --all");
     };
 
-    if miners_to_stop.is_empty() {
+    if hosts_to_stop.is_empty() {
         println!("No miners to stop.");
         return Ok(());
     }
 
-    for miner in miners_to_stop {
+    let mut changed = false;
+    for host in hosts_to_stop {
+        let miner = config.miners.get(&host).unwrap().clone();
         if let Err(e) = stop_miner(&miner).await {
-            eprintln!("Failed to stop miner {}: {}", miner.host, e);
+            eprintln!("Failed to stop miner {}: {}", host, e);
+        } else {
+            // Success, update last_stop_timestamp
+            if let Some(m) = config.miners.get_mut(&host) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs();
+                m.last_stop_timestamp = Some(now);
+                changed = true;
+            }
         }
+    }
+
+    if changed {
+        config.save()?;
     }
 
     Ok(())
@@ -440,6 +474,17 @@ async fn start(host_arg: Option<String>, all: bool) -> Result<()> {
 }
 
 async fn start_miner(miner: &Miner) -> Result<()> {
+    // Check stop-start delay
+    if let (Some(last_stop), Some(delay)) = (miner.last_stop_timestamp, miner.stop_start_delay_seconds) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let elapsed = now.saturating_sub(last_stop);
+        if elapsed < delay {
+            anyhow::bail!("Stop-start delay active for miner {}. Please wait {} more seconds.", miner.host, delay - elapsed);
+        }
+    }
+
     println!("Starting bosminer on {}...", miner.host);
 
     let client = Client::builder()
@@ -802,6 +847,69 @@ async fn rate_limit(
     Ok(())
 }
 
+async fn stop_start_delay(
+    host_arg: Option<String>,
+    seconds: Option<u64>,
+    list: bool,
+    all: bool,
+) -> Result<()> {
+    let mut config = Config::load()?;
+
+    if list {
+        if all {
+            for miner in config.miners.values() {
+                if let Some(delay) = miner.stop_start_delay_seconds {
+                    println!("Miner {} stop-start delay: {}s", miner.host, delay);
+                } else {
+                    println!("Miner {} stop-start delay: none", miner.host);
+                }
+            }
+        } else if let Some(host) = host_arg {
+            if let Some(miner) = config.miners.get(&host) {
+                if let Some(delay) = miner.stop_start_delay_seconds {
+                    println!("Miner {} stop-start delay: {}s", host, delay);
+                } else {
+                    println!("Miner {} stop-start delay: none", host);
+                }
+            } else {
+                anyhow::bail!("Miner {} not found in config.", host);
+            }
+        } else {
+            println!("Use --host <HOST> to see miner-specific stop-start delay or --all to see all.");
+        }
+        return Ok(());
+    }
+
+    let s = seconds; // This can be None to remove the delay
+
+    if all {
+        for miner in config.miners.values_mut() {
+            miner.stop_start_delay_seconds = s;
+        }
+        if let Some(val) = s {
+            println!("Set stop-start delay to {}s for all miners.", val);
+        } else {
+            println!("Removed stop-start delay for all miners.");
+        }
+    } else if let Some(host) = host_arg {
+        if let Some(miner) = config.miners.get_mut(&host) {
+            miner.stop_start_delay_seconds = s;
+            if let Some(val) = s {
+                println!("Set stop-start delay to {}s for {}.", val, host);
+            } else {
+                println!("Removed stop-start delay for {}.", host);
+            }
+        } else {
+            anyhow::bail!("Miner {} not found in config.", host);
+        }
+    } else {
+        anyhow::bail!("Please specify a host using --host <HOST> or use --all.");
+    }
+
+    config.save()?;
+    Ok(())
+}
+
 async fn login(host: String, username: String, password: Option<String>) -> Result<()> {
     println!("Testing login to {}...", host);
 
@@ -848,6 +956,8 @@ async fn login(host: String, username: String, password: Option<String>) -> Resu
                     power_allowlist: Vec::new(),
                     rate_limit_seconds: None,
                     last_set_power_timestamp: None,
+                    stop_start_delay_seconds: None,
+                    last_stop_timestamp: None,
                 },
             );
             config.save()?;
