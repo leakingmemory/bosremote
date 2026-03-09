@@ -107,6 +107,29 @@ bosremote allow-power --all --list
 
 When a miner's allowlist is empty, any power setting is allowed for that miner.
 
+### Rate Limit
+
+To set a rate limit in seconds between `set-power` commands for specific miners:
+
+```bash
+# Set a 60-second rate limit for a specific miner
+bosremote rate-limit 10.54.2.249 60
+
+# Set a 60-second rate limit for ALL miners
+bosremote rate-limit --all 60
+
+# Remove rate limit for a specific miner
+bosremote rate-limit 10.54.2.249
+
+# List rate limit for a specific miner
+bosremote rate-limit --host 10.54.2.249 --list
+
+# List all rate limits for all miners
+bosremote rate-limit --all --list
+```
+
+The rate limit is enforced locally based on the last successful `set-power` command performed by `bosremote`.
+
 ### Configuration
 
 The miner credentials are stored in a JSON file at:

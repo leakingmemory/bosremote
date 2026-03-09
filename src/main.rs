@@ -75,6 +75,19 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Set a rate limit (in seconds) between allowed set-power commands
+    RateLimit {
+        /// Miner IP address or hostname
+        host: Option<String>,
+        /// Rate limit in seconds
+        seconds: Option<u64>,
+        /// List the current rate limit(s)
+        #[arg(short, long)]
+        list: bool,
+        /// Apply rate limit to all stored miners
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -84,6 +97,10 @@ struct Miner {
     password: Option<String>,
     #[serde(default)]
     power_allowlist: Vec<u32>,
+    #[serde(default)]
+    rate_limit_seconds: Option<u64>,
+    #[serde(default)]
+    last_set_power_timestamp: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -146,6 +163,9 @@ async fn main() -> Result<()> {
         }
         Commands::AllowPower { host, power, remove, list, all } => {
             allow_power(host, power, remove, list, all).await?;
+        }
+        Commands::RateLimit { host, seconds, list, all } => {
+            rate_limit(host, seconds, list, all).await?;
         }
     }
 
@@ -490,13 +510,13 @@ async fn start_miner(miner: &Miner) -> Result<()> {
 }
 
 async fn set_power(host_arg: Option<String>, power: u32, all: bool) -> Result<()> {
-    let config = Config::load()?;
+    let mut config = Config::load()?;
     
-    let miners_to_set = if all {
-        config.miners.values().cloned().collect::<Vec<_>>()
+    let hosts_to_set = if all {
+        config.miners.keys().cloned().collect::<Vec<_>>()
     } else if let Some(host) = host_arg {
-        if let Some(miner) = config.miners.get(&host) {
-            vec![miner.clone()]
+        if config.miners.contains_key(&host) {
+            vec![host]
         } else {
             anyhow::bail!("Miner {} not found in config. Please login first.", host);
         }
@@ -504,12 +524,15 @@ async fn set_power(host_arg: Option<String>, power: u32, all: bool) -> Result<()
         anyhow::bail!("Please specify a host or use --all");
     };
 
-    if miners_to_set.is_empty() {
+    if hosts_to_set.is_empty() {
         println!("No miners to update.");
         return Ok(());
     }
 
-    for miner in miners_to_set {
+    let mut changed = false;
+    for host in hosts_to_set {
+        let miner = config.miners.get(&host).unwrap().clone();
+        
         // Check miner-specific allowlist
         if !miner.power_allowlist.is_empty() && !miner.power_allowlist.contains(&power) {
             println!("Error: Power setting {}W is not in the allowlist for miner {}.", power, miner.host);
@@ -517,9 +540,37 @@ async fn set_power(host_arg: Option<String>, power: u32, all: bool) -> Result<()
             continue;
         }
 
+        // Check rate limit
+        if let Some(limit) = miner.rate_limit_seconds {
+            if let Some(last_ts) = miner.last_set_power_timestamp {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs();
+                let elapsed = now.saturating_sub(last_ts);
+                if elapsed < limit {
+                    println!("Error: Rate limit active for miner {}. Please wait {} more seconds.", miner.host, limit - elapsed);
+                    continue;
+                }
+            }
+        }
+
         if let Err(e) = set_power_miner(&miner, power).await {
             eprintln!("Failed to set power for miner {}: {}", miner.host, e);
+        } else {
+            // Update last_set_power_timestamp on success
+            if let Some(m) = config.miners.get_mut(&host) {
+                m.last_set_power_timestamp = Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs()
+                );
+                changed = true;
+            }
         }
+    }
+
+    if changed {
+        config.save()?;
     }
 
     Ok(())
@@ -688,6 +739,69 @@ fn update_allowlist(list: &mut Vec<u32>, power: u32, remove: bool) {
     }
 }
 
+async fn rate_limit(
+    host_arg: Option<String>,
+    seconds: Option<u64>,
+    list: bool,
+    all: bool,
+) -> Result<()> {
+    let mut config = Config::load()?;
+
+    if list {
+        if all {
+            for miner in config.miners.values() {
+                if let Some(limit) = miner.rate_limit_seconds {
+                    println!("Miner {} rate limit: {}s", miner.host, limit);
+                } else {
+                    println!("Miner {} rate limit: none", miner.host);
+                }
+            }
+        } else if let Some(host) = host_arg {
+            if let Some(miner) = config.miners.get(&host) {
+                if let Some(limit) = miner.rate_limit_seconds {
+                    println!("Miner {} rate limit: {}s", host, limit);
+                } else {
+                    println!("Miner {} rate limit: none", host);
+                }
+            } else {
+                anyhow::bail!("Miner {} not found in config.", host);
+            }
+        } else {
+            println!("Use --host <HOST> to see miner-specific rate limit or --all to see all.");
+        }
+        return Ok(());
+    }
+
+    let s = seconds; // This can be None to remove the rate limit
+
+    if all {
+        for miner in config.miners.values_mut() {
+            miner.rate_limit_seconds = s;
+        }
+        if let Some(val) = s {
+            println!("Set rate limit to {}s for all miners.", val);
+        } else {
+            println!("Removed rate limit for all miners.");
+        }
+    } else if let Some(host) = host_arg {
+        if let Some(miner) = config.miners.get_mut(&host) {
+            miner.rate_limit_seconds = s;
+            if let Some(val) = s {
+                println!("Set rate limit to {}s for {}.", val, host);
+            } else {
+                println!("Removed rate limit for {}.", host);
+            }
+        } else {
+            anyhow::bail!("Miner {} not found in config.", host);
+        }
+    } else {
+        anyhow::bail!("Please specify a host using --host <HOST> or use --all.");
+    }
+
+    config.save()?;
+    Ok(())
+}
+
 async fn login(host: String, username: String, password: Option<String>) -> Result<()> {
     println!("Testing login to {}...", host);
 
@@ -732,6 +846,8 @@ async fn login(host: String, username: String, password: Option<String>) -> Resu
                     username,
                     password,
                     power_allowlist: Vec::new(),
+                    rate_limit_seconds: None,
+                    last_set_power_timestamp: None,
                 },
             );
             config.save()?;
